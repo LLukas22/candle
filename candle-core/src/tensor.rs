@@ -444,10 +444,14 @@ impl Tensor {
     binary_op!(mul, Mul);
     binary_op!(sub, Sub);
     binary_op!(div, Div);
+    binary_op!(maximum, Maximum);
+    binary_op!(minimum, Minimum);
     broadcast_binary_op!(broadcast_add, add);
     broadcast_binary_op!(broadcast_mul, mul);
     broadcast_binary_op!(broadcast_sub, sub);
     broadcast_binary_op!(broadcast_div, div);
+    broadcast_binary_op!(broadcast_maximum, maximum);
+    broadcast_binary_op!(broadcast_minimum, minimum);
 
     unary_op!(recip, Recip);
     unary_op!(neg, Neg);
@@ -485,6 +489,25 @@ impl Tensor {
     /// An alias for `to_scalar`.
     pub fn to_vec0<S: crate::WithDType>(&self) -> Result<S> {
         self.to_scalar::<S>()
+    }
+
+    /// Repeat this tensor along the specified dimensions.
+    pub fn repeat<S: Into<Shape>>(&self, shape: S) -> Result<Tensor> {
+        // Similar to PyTorch, we extend the number of dimensions of self if needed.
+        let repeats = shape.into();
+        let repeats = repeats.dims();
+        let mut inp = if self.rank() < repeats.len() {
+            let shape = [vec![1; repeats.len() - self.rank()], self.dims().to_vec()].concat();
+            self.reshape(shape)?
+        } else {
+            self.clone()
+        };
+        for (idx, &repeat) in repeats.iter().enumerate() {
+            if repeat > 1 {
+                inp = Tensor::cat(&vec![&inp; repeat], idx)?
+            }
+        }
+        Ok(inp)
     }
 
     /// This operation multiplies the input tensor by `mul` then adds `add` and return the result.

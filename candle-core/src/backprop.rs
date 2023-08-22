@@ -162,6 +162,21 @@ impl Tensor {
                         let rhs_sum_grad = grads.or_insert(rhs)?;
                         *rhs_sum_grad = rhs_sum_grad.sub(&rhs_grad)?;
                     }
+                    Op::Binary(lhs, rhs, BinaryOp::Minimum)
+                    | Op::Binary(lhs, rhs, BinaryOp::Maximum) => {
+                        let mask_lhs = node.eq(lhs)?.to_dtype(grad.dtype())?;
+                        let mask_rhs = node.eq(rhs)?.to_dtype(grad.dtype())?;
+
+                        // If both masks are 1 one the same point, we want to scale the
+                        // gradient by 0.5 rather than 1.
+                        let lhs_grad = mask_lhs.mul(&grad)?.div(&(&mask_rhs + 1.)?)?;
+                        let lhs_sum_grad = grads.or_insert(lhs)?;
+                        *lhs_sum_grad = lhs_sum_grad.add(&lhs_grad)?;
+
+                        let rhs_grad = mask_rhs.mul(&grad)?.div(&(&mask_lhs + 1.)?)?;
+                        let rhs_sum_grad = grads.or_insert(rhs)?;
+                        *rhs_sum_grad = rhs_sum_grad.add(&rhs_grad)?;
+                    }
                     Op::WhereCond(pred, t, f) => {
                         let zeros = grad.zeros_like()?;
                         let t_sum_grad = grads.or_insert(t)?;

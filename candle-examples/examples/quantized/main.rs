@@ -1,5 +1,11 @@
 #![allow(dead_code)]
-use clap::Parser;
+#[cfg(feature = "mkl")]
+extern crate intel_mkl_src;
+
+#[cfg(feature = "accelerate")]
+extern crate accelerate_src;
+
+use clap::{Parser, ValueEnum};
 use std::collections::HashMap;
 use std::io::Write;
 use tokenizers::Tokenizer;
@@ -285,6 +291,16 @@ impl ModelWeights {
     }
 }
 
+#[derive(Clone, Debug, Copy, ValueEnum)]
+enum Which {
+    #[value(name = "7b")]
+    L7b,
+    #[value(name = "13b")]
+    L13b,
+    #[value(name = "70b")]
+    L70b,
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -319,6 +335,18 @@ struct Args {
     /// Display the token for the specified prompt.
     #[arg(long)]
     verbose_prompt: bool,
+
+    /// Penalty to be applied for repeating tokens, 1. means no penalty.
+    #[arg(long, default_value_t = 1.0)]
+    repeat_penalty: f32,
+
+    /// The context size to consider for the repeat penalty.
+    #[arg(long, default_value_t = 64)]
+    repeat_last_n: usize,
+
+    /// The model size to use.
+    #[arg(long, default_value = "7b")]
+    which: Which,
 }
 
 impl Args {
@@ -338,9 +366,14 @@ impl Args {
         let model_path = match &self.model {
             Some(config) => std::path::PathBuf::from(config),
             None => {
+                let (repo, filename) = match self.which {
+                    Which::L7b => ("TheBloke/Llama-2-7B-GGML", "llama-2-7b.ggmlv3.q4_0.bin"),
+                    Which::L13b => ("TheBloke/Llama-2-13B-GGML", "llama-2-13b.ggmlv3.q4_0.bin"),
+                    Which::L70b => ("TheBloke/Llama-2-70B-GGML", "llama-2-70b.ggmlv3.q4_0.bin"),
+                };
                 let api = hf_hub::api::sync::Api::new()?;
-                let api = api.model("TheBloke/Llama-2-7B-GGML".to_string());
-                api.get("llama-2-7b.ggmlv3.q4_0.bin")?
+                let api = api.model(repo.to_string());
+                api.get(filename)?
             }
         };
         Ok(model_path)
@@ -370,6 +403,22 @@ fn print_token(next_token: u32, tokenizer: &Tokenizer) {
         }
         let _ = std::io::stdout().flush();
     }
+}
+
+fn apply_repeat_penalty(logits: &Tensor, penalty: f32, context: &[u32]) -> Result<Tensor> {
+    let mut logits = logits.to_vec1::<f32>()?;
+    let context: std::collections::HashSet<_> = context.iter().collect();
+    for (token_id, logit) in logits.iter_mut().enumerate() {
+        if context.contains(&(token_id as u32)) {
+            if *logit >= 0. {
+                *logit /= penalty
+            } else {
+                *logit *= penalty
+            }
+        }
+    }
+    let logits_len = logits.len();
+    Tensor::from_vec(logits, logits_len, &Device::Cpu)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -433,6 +482,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let prompt_tokens = tokens.get_ids().to_vec();
+    let mut all_tokens = vec![];
     let mut logits_processor = LogitsProcessor::new(args.seed, args.temperature);
 
     print!("{prompt}");
@@ -445,6 +495,7 @@ fn main() -> anyhow::Result<()> {
         logits_processor.sample(&logits)?
     };
     let prompt_dt = start_prompt_processing.elapsed();
+    all_tokens.push(next_token);
     print_token(next_token, &tokenizer);
 
     let to_sample = args.sample_len.saturating_sub(1);
@@ -453,7 +504,14 @@ fn main() -> anyhow::Result<()> {
         let input = Tensor::new(&[next_token], &Device::Cpu)?.unsqueeze(0)?;
         let logits = model.forward(&input, prompt_tokens.len() + index)?;
         let logits = logits.squeeze(0)?;
+        let logits = if args.repeat_penalty == 1. {
+            logits
+        } else {
+            let start_at = all_tokens.len().saturating_sub(args.repeat_last_n);
+            apply_repeat_penalty(&logits, args.repeat_penalty, &all_tokens[start_at..])?
+        };
         next_token = logits_processor.sample(&logits)?;
+        all_tokens.push(next_token);
         print_token(next_token, &tokenizer);
     }
     let dt = start_post_prompt.elapsed();
