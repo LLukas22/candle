@@ -540,6 +540,73 @@ impl Tensor {
         Ok(inp)
     }
 
+    /// Creates grids of coordinates specified by the 1D inputs.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - A slice of 1D tensors.
+    /// * `xy_indexing` - Whether to use xy indexing or ij indexing. If xy is selected, the
+    /// first dimension corresponds to the cardinality of the second input and the second
+    /// dimension corresponds to the cardinality of the first input. If ij is selected, the
+    /// dimensions are in the same order as the cardinality of the inputs.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use candle_core::{Tensor, Device, Shape};
+    /// let x = Tensor::new(&[1f32, 2., 3.], &Device::Cpu)?;
+    /// let y = Tensor::new(&[4f32, 5., 6.], &Device::Cpu)?;
+    ///
+    /// let grids_xy = Tensor::meshgrid(&[&x, &y], true)?;
+    ///
+    /// assert_eq!(grids_xy.len(), 2);
+    /// assert_eq!(grids_xy[0].dims(), &[3, 3]);
+    ///
+    /// assert_eq!(grids_xy[0].to_vec2::<f32>()?, &[[1., 2., 3.], [1., 2., 3.], [1., 2., 3.]]);
+    /// assert_eq!(grids_xy[1].to_vec2::<f32>()?, &[[4., 4., 4.], [5., 5., 5.], [6., 6., 6.]]);
+    ///
+    /// let grids_ij = Tensor::meshgrid(&[&x, &y], false)?;
+    ///
+    /// assert_eq!(grids_ij[0].to_vec2::<f32>()?, &[[1., 1., 1.], [2., 2., 2.], [3., 3., 3.]]);
+    /// assert_eq!(grids_ij[1].to_vec2::<f32>()?, &[[4., 5., 6.], [4., 5., 6.], [4., 5., 6.]]);
+    /// # Ok::<(), candle_core::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * Will return `Err` if `args` contains less than 2 tensors.
+    ///
+    pub fn meshgrid<A: AsRef<Tensor>>(args: &[A], xy_indexing: bool) -> Result<Vec<Self>> {
+        if args.len() <= 1 {
+            Err(Error::OpRequiresAtLeastTwoTensors { op: "meshgrid" }.bt())?
+        }
+        let args: Vec<_> = if xy_indexing {
+            args.iter().rev().collect()
+        } else {
+            args.iter().collect()
+        };
+
+        let mut shape = Vec::with_capacity(args.len());
+        for arg in args.iter() {
+            shape.push(arg.as_ref().dims1()?)
+        }
+
+        let mut grids = Vec::with_capacity(args.len());
+        for idx in 0..args.len() {
+            let mut ones = vec![1usize; args.len()];
+            ones[idx] = shape[idx];
+            let arg = args[idx].as_ref().reshape(ones)?;
+            let mut repeats = shape.clone();
+            repeats[idx] = 1;
+            let repeated_tensor = arg.repeat(repeats)?;
+            grids.push(repeated_tensor);
+        }
+        if xy_indexing {
+            grids.reverse();
+        }
+        Ok(grids)
+    }
+
     /// This operation multiplies the input tensor by `mul` then adds `add` and return the result.
     /// The input values `mul` and `add` are casted to the appropriate type so some rounding might
     /// be performed.
@@ -1119,14 +1186,16 @@ impl Tensor {
                 op: "scatter-add (self, src)",
                 lhs: self.shape().clone(),
                 rhs: source.shape().clone(),
-            })?
+            }
+            .bt())?
         }
         if indexes.dims() != source.dims() {
             Err(Error::ShapeMismatchBinaryOp {
                 op: "scatter-add (indexes, src)",
                 lhs: indexes.shape().clone(),
                 rhs: source.shape().clone(),
-            })?
+            }
+            .bt())?
         }
         let storage = self.storage().scatter_add(
             self.layout(),
@@ -1198,7 +1267,8 @@ impl Tensor {
                 op: "slice-scatter (self, src)",
                 lhs: self.shape().clone(),
                 rhs: src.shape().clone(),
-            })?
+            }
+            .bt())?
         }
         let mut storage = self.device().zeros(self.shape(), self.dtype())?;
         self.storage()
@@ -1232,7 +1302,8 @@ impl Tensor {
                 op: "index-add (self, source)",
                 lhs: self.shape().clone(),
                 rhs: source.shape().clone(),
-            })?
+            }
+            .bt())?
         }
         // The number of element in indexes must match the dimension on which the add is
         // performed on the source tensor (and the index values from `indexes` are taken from
@@ -1243,7 +1314,8 @@ impl Tensor {
                 op: "index-add (ids, source))",
                 lhs: indexes.shape().clone(),
                 rhs: source.shape().clone(),
-            })?
+            }
+            .bt())?
         }
         let storage = self.storage().index_add(
             self.layout(),
@@ -1291,7 +1363,8 @@ impl Tensor {
                 op: "gather",
                 lhs: self.shape().clone(),
                 rhs: indexes.shape().clone(),
-            })?
+            }
+            .bt())?
         }
         let storage =
             self.storage()
@@ -2196,6 +2269,11 @@ impl Tensor {
     /// Run the `forward` method of `m` on `self`.
     pub fn apply<M: crate::Module>(&self, m: &M) -> Result<Self> {
         m.forward(self)
+    }
+
+    /// Run the `forward` method of `m` on `self`.
+    pub fn apply_t<M: crate::ModuleT>(&self, m: &M, train: bool) -> Result<Self> {
+        m.forward_t(self, train)
     }
 
     pub(crate) fn storage(&self) -> std::sync::RwLockReadGuard<'_, Storage> {
