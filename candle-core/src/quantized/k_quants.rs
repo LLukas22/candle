@@ -1889,33 +1889,95 @@ pub fn matmul<T: GgmlType>(
     );
     let k_in_blocks = k.div_ceil(T::BLCK_SIZE);
 
-    // TODO: Pre-allocate this.
+    // Pre-allocate and reuse across calls
     let mut lhs_b = vec![T::VecDotType::zeros(); m * k_in_blocks];
+    
     // f32, f16, and bf16 support direct copy
     if T::DIRECT_COPY {
         T::VecDotType::direct_copy(lhs, &mut lhs_b);
     } else {
-        for row_idx in 0..m {
-            let lhs_b_mut = &mut lhs_b[row_idx * k_in_blocks..(row_idx + 1) * k_in_blocks];
-            let lhs = &lhs[row_idx * k..(row_idx + 1) * k];
-            T::VecDotType::from_float(lhs, lhs_b_mut)
-        }
-    }
-
-    for row_idx in 0..m {
-        let lhs_row = &lhs_b[row_idx * k_in_blocks..(row_idx + 1) * k_in_blocks];
-        let dst_row = &mut dst[row_idx * n..(row_idx + 1) * n];
-
-        dst_row
-            .into_par_iter()
+        // Parallelize the quantization across threads
+        lhs_b
+            .par_chunks_mut(k_in_blocks)
             .enumerate()
-            .with_min_len(128)
-            .with_max_len(512)
-            .for_each(|(col_idx, dst)| {
-                let rhs_col = &rhs_t[col_idx * k_in_blocks..(col_idx + 1) * k_in_blocks];
-                *dst = T::vec_dot(k, rhs_col, lhs_row);
+            .for_each(|(row_idx, lhs_b_mut)| {
+                let lhs_row = &lhs[row_idx * k..(row_idx + 1) * k];
+                T::VecDotType::from_float(lhs_row, lhs_b_mut);
             });
     }
+
+    // Dynamic chunking based on problem size (mimics C++ chunk_size logic)
+    // Use larger chunks for small problems to reduce overhead
+    let chunk_size = if m == 1 || n == 1 { 64 } else { 16 };
+    
+    // Cache blocking with tiles
+    // Process output in 16-column blocks for better cache locality
+    const BLOCK_SIZE_N: usize = 16;
+    
+    // Determine parallelization strategy
+    let num_threads = rayon::current_num_threads();
+    let total_work = (m + chunk_size - 1) / chunk_size * (n + chunk_size - 1) / chunk_size;
+    
+    // Choose parallelization dimension based on matrix shape
+    // Parallelize along the larger dimension for better load balancing
+    if m >= n && m >= num_threads * 2 {
+        // Parallelize over rows when m is large
+        dst.par_chunks_mut(n)
+            .enumerate()
+            .for_each(|(row_idx, dst_row)| {
+                let lhs_row = &lhs_b[row_idx * k_in_blocks..(row_idx + 1) * k_in_blocks];
+                
+                // Process columns in blocks for cache locality
+                for col_block_start in (0..n).step_by(BLOCK_SIZE_N) {
+                    let col_block_end = (col_block_start + BLOCK_SIZE_N).min(n);
+                    
+                    for col_idx in col_block_start..col_block_end {
+                        let rhs_col = &rhs_t[col_idx * k_in_blocks..(col_idx + 1) * k_in_blocks];
+                        dst_row[col_idx] = T::vec_dot(k, rhs_col, lhs_row);
+                    }
+                }
+            });
+    } else if total_work >= num_threads * 4 {
+        // Parallelize over rows with cache-blocked columns
+        // This avoids synchronization while maintaining cache locality
+        dst.par_chunks_mut(n)
+            .enumerate()
+            .for_each(|(row_idx, dst_row)| {
+                let lhs_row = &lhs_b[row_idx * k_in_blocks..(row_idx + 1) * k_in_blocks];
+                
+                // Process columns in blocks for better cache locality (mimics C++ blck_1)
+                for col_block_start in (0..n).step_by(BLOCK_SIZE_N) {
+                    let col_block_end = (col_block_start + BLOCK_SIZE_N).min(n);
+                    
+                    for col_idx in col_block_start..col_block_end {
+                        let rhs_col = &rhs_t[col_idx * k_in_blocks..(col_idx + 1) * k_in_blocks];
+                        dst_row[col_idx] = T::vec_dot(k, rhs_col, lhs_row);
+                    }
+                }
+            });
+    } else {
+        // Original approach: parallelize columns within each row sequentially
+        // Good for small matrices or when m is very small
+        for row_idx in 0..m {
+            let lhs_row = &lhs_b[row_idx * k_in_blocks..(row_idx + 1) * k_in_blocks];
+            let dst_row = &mut dst[row_idx * n..(row_idx + 1) * n];
+
+            // Adjust chunk size based on n to reduce parallel overhead
+            let min_len = if n < 256 { 32 } else if n < 1024 { 64 } else { 128 };
+            let max_len = if n < 256 { 128 } else if n < 1024 { 256 } else { 512 };
+
+            dst_row
+                .par_iter_mut()
+                .enumerate()
+                .with_min_len(min_len)
+                .with_max_len(max_len)
+                .for_each(|(col_idx, dst)| {
+                    let rhs_col = &rhs_t[col_idx * k_in_blocks..(col_idx + 1) * k_in_blocks];
+                    *dst = T::vec_dot(k, rhs_col, lhs_row);
+                });
+        }
+    }
+    
     Ok(())
 }
 
