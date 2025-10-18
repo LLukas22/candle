@@ -46,6 +46,9 @@ impl NonZeroTrait for CpuStorage {
             CpuStorage::F32(vs) => nonzero(vs, layout),
             CpuStorage::F64(vs) => nonzero(vs, layout),
             CpuStorage::F8E4M3(vs) => nonzero(vs, layout),
+            CpuStorage::Quantized(q, _) => {
+                return Err(Error::UnsupportedDTypeForOp(candle::DType::Quantized(*q), "nonzero"))
+            }
         };
         let index_len = layout.dims().len();
         let result_len = result.len() / index_len;

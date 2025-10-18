@@ -2,6 +2,7 @@
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{DType, Error, IntDType, Layout, Result, Shape, WithDType};
+use crate::dtype::QuantizedDType;
 use float8::F8E4M3;
 use half::{bf16, f16};
 use rayon::prelude::*;
@@ -27,6 +28,7 @@ pub enum CpuStorage {
     F32(Vec<f32>),
     F64(Vec<f64>),
     F8E4M3(Vec<F8E4M3>),
+    Quantized(QuantizedDType, Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +41,7 @@ pub enum CpuStorageRef<'a> {
     F32(&'a [f32]),
     F64(&'a [f64]),
     F8E4M3(&'a [F8E4M3]),
+    Quantized(QuantizedDType, &'a [u8]),
 }
 
 #[derive(Debug, Clone)]
@@ -1314,6 +1317,43 @@ impl MatMul {
 impl Map2 for MatMul {
     const OP: &'static str = "mat_mul";
 
+    // Override map() to provide specialized quantized matmul
+    fn map(&self, lhs: &CpuStorage, lhs_l: &Layout, rhs: &CpuStorage, rhs_l: &Layout) -> Result<CpuStorage> {
+        use crate::cpu_backend::utils::Map2 as Map2Trait;
+        
+        match (lhs, rhs) {
+            // ONLY support f32 × quantized (MOST COMMON - inference pattern)
+            // This is the typical pattern: f32_activations @ quantized_weights
+            (CpuStorage::F32(lhs_f32), CpuStorage::Quantized(rhs_id, rhs_data)) => {
+                let (b, m, n, k) = self.0;
+                let lhs_shape = &[b, m, k];
+                let rhs_shape = &[b, k, n];
+                
+                // Call the matmul (f32 × quantized → f32)
+                let result = crate::dtype::quantized_dispatch::matmul_cpu(
+                    lhs_f32,
+                    lhs_shape,
+                    *rhs_id,
+                    rhs_data,
+                    rhs_shape,
+                )?;
+                
+                // Result is f32
+                Ok(CpuStorage::F32(result))
+            }
+            
+            // For all other combinations involving quantized data, use auto-dequantization
+            (CpuStorage::Quantized(_, _), _) | (_, CpuStorage::Quantized(_, _)) => {
+                <Self as Map2Trait>::map(self, lhs, lhs_l, rhs, rhs_l)
+            }
+            
+            // For all other types (F32×F32, F64×F64, etc.), use default Map2 implementation
+            _ => {
+                <Self as Map2Trait>::map(self, lhs, lhs_l, rhs, rhs_l)
+            }
+        }
+    }
+
     #[cfg(all(not(feature = "mkl"), not(feature = "accelerate")))]
     fn f<T: 'static + WithDType + num_traits::Num + Copy>(
         &self,
@@ -1626,6 +1666,7 @@ impl CpuStorage {
             Self::F32(s) => s.len(),
             Self::F64(s) => s.len(),
             Self::F8E4M3(s) => s.len(),
+            Self::Quantized(_, s) => s.len(),
         }
     }
 
@@ -1728,6 +1769,17 @@ impl CpuStorage {
                     .concat();
                 Self::F8E4M3(storages)
             }
+            Self::Quantized(q, _) => {
+                let storages = storages
+                    .iter()
+                    .map(|s| match s {
+                        Self::Quantized(q2, s) if q == q2 => Ok(s.as_slice()),
+                        _ => crate::bail!("dtype mismatch"),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .concat();
+                Self::Quantized(*q, storages)
+            }
         };
         Ok(s)
     }
@@ -1750,6 +1802,7 @@ impl BackendStorage for CpuStorage {
             Self::F32(_) => DType::F32,
             Self::F64(_) => DType::F64,
             Self::F8E4M3(_) => DType::F8E4M3,
+            Self::Quantized(q, _) => DType::Quantized(*q),
         }
     }
 
@@ -1789,9 +1842,10 @@ impl BackendStorage for CpuStorage {
                 let data = unary_map(storage, layout, |v| v.powf(F8E4M3::from_f64(e)));
                 Ok(Self::F8E4M3(data))
             }
-            Self::U8(_) => Err(Error::UnsupportedDTypeForOp(DType::U8, "elu").bt()),
-            Self::U32(_) => Err(Error::UnsupportedDTypeForOp(DType::U32, "elu").bt()),
-            Self::I64(_) => Err(Error::UnsupportedDTypeForOp(DType::I64, "elu").bt()),
+            Self::U8(_) => Err(Error::UnsupportedDTypeForOp(DType::U8, "powf").bt()),
+            Self::U32(_) => Err(Error::UnsupportedDTypeForOp(DType::U32, "powf").bt()),
+            Self::I64(_) => Err(Error::UnsupportedDTypeForOp(DType::I64, "powf").bt()),
+            Self::Quantized(q, _) => Err(Error::UnsupportedDTypeForOp(DType::Quantized(*q), "powf").bt()),
         }
     }
 
@@ -1821,6 +1875,7 @@ impl BackendStorage for CpuStorage {
             Self::U8(_) => Err(Error::UnsupportedDTypeForOp(DType::U8, "elu").bt()),
             Self::U32(_) => Err(Error::UnsupportedDTypeForOp(DType::U32, "elu").bt()),
             Self::I64(_) => Err(Error::UnsupportedDTypeForOp(DType::I64, "elu").bt()),
+            Self::Quantized(q, _) => Err(Error::UnsupportedDTypeForOp(DType::Quantized(*q), "elu").bt()),
         }
     }
 
@@ -2143,6 +2198,12 @@ impl BackendStorage for CpuStorage {
                 let data = unary_map(storage, layout, |v| v);
                 Ok(Self::F8E4M3(data))
             }
+            (_, DType::Quantized(q)) => {
+                crate::bail!("conversion to quantized type {:?} not supported", q)
+            }
+            (Self::Quantized(q, _), _) => {
+                crate::bail!("conversion from quantized type {:?} not supported", q)
+            }
         }
     }
 
@@ -2204,6 +2265,9 @@ impl BackendStorage for CpuStorage {
             Self::I64(storage) => {
                 let data = unary_map(storage, layout, B::i64);
                 Ok(Self::I64(data))
+            }
+            Self::Quantized(q, _) => {
+                Err(Error::UnsupportedDTypeForOp(DType::Quantized(*q), "unary op").bt())
             }
         }
     }
@@ -2861,6 +2925,9 @@ impl BackendDevice<CpuStorage> for CpuDevice {
                 }
                 Ok(CpuStorage::F64(data))
             }
+            DType::Quantized(q) => {
+                Err(Error::UnsupportedDTypeForOp(DType::Quantized(q), "rand_uniform").bt())
+            }
         }
     }
 
@@ -2933,6 +3000,9 @@ impl BackendDevice<CpuStorage> for CpuDevice {
                 }
                 Ok(CpuStorage::F64(data))
             }
+            DType::Quantized(q) => {
+                Err(Error::UnsupportedDTypeForOp(DType::Quantized(q), "rand_normal").bt())
+            }
         }
     }
 
@@ -2984,6 +3054,9 @@ impl BackendDevice<CpuStorage> for CpuDevice {
                 v.set_len(elem_count);
                 CpuStorage::F8E4M3(v)
             }
+            DType::Quantized(q) => {
+                return Err(Error::UnsupportedDTypeForOp(DType::Quantized(q), "alloc_uninit").bt())
+            }
         };
         Ok(storage)
     }
@@ -2999,6 +3072,9 @@ impl BackendDevice<CpuStorage> for CpuDevice {
             DType::F8E4M3 => CpuStorage::F8E4M3(vec![F8E4M3::ZERO; elem_count]),
             DType::F32 => CpuStorage::F32(vec![0f32; elem_count]),
             DType::F64 => CpuStorage::F64(vec![0f64; elem_count]),
+            DType::Quantized(q) => {
+                return Err(Error::UnsupportedDTypeForOp(DType::Quantized(q), "zeros").bt())
+            }
         };
         Ok(storage)
     }

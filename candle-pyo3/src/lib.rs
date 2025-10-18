@@ -224,6 +224,9 @@ trait MapDType {
             DType::F32 => self.f::<f32>(t),
             DType::F64 => self.f::<f64>(t),
             DType::F8E4M3 => self.f::<F8E4M3>(t),
+            DType::Quantized(q) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                format!("Quantized type {:?} not supported in pyo3 bindings", q)
+            )),
         }
     }
 }

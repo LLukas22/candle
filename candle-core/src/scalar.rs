@@ -33,6 +33,9 @@ impl Scalar {
             DType::F32 => Scalar::F32(0.0),
             DType::F64 => Scalar::F64(0.0),
             DType::F8E4M3 => Scalar::F8E4M3(F8E4M3::ZERO),
+            DType::Quantized(_) => {
+                panic!("Scalar operations not supported for quantized types")
+            }
         }
     }
 
@@ -46,6 +49,9 @@ impl Scalar {
             DType::F32 => Scalar::F32(1.0),
             DType::F64 => Scalar::F64(1.0),
             DType::F8E4M3 => Scalar::F8E4M3(F8E4M3::ONE),
+            DType::Quantized(_) => {
+                panic!("Scalar operations not supported for quantized types")
+            }
         }
     }
 

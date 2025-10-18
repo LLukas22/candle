@@ -92,6 +92,7 @@ impl Header {
             DType::U32 => "u4",
             DType::U8 => "u1",
             DType::F8E4M3 => Err(Error::Npy("f8e4m3 is not supported".into()))?,
+            DType::Quantized(_) => Err(Error::Npy("quantized types are not supported".into()))?,
         };
         if !shape.is_empty() {
             shape.push(',')
@@ -249,6 +250,9 @@ impl Tensor<CpuStorage> {
                 let len = data_t.len();
                 reader.read_i8_into(unsafe { slice::from_raw_parts_mut(ptr, len) })?;
                 Tensor::from_vec(data_t, shape, &CpuDevice {})
+            }
+            DType::Quantized(_) => {
+                crate::bail!("npy format does not support quantized types")
             }
         }
     }

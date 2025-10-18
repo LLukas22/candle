@@ -28,6 +28,9 @@ impl From<DType> for st::Dtype {
             DType::F32 => st::Dtype::F32,
             DType::F64 => st::Dtype::F64,
             DType::F8E4M3 => st::Dtype::F8_E4M3,
+            DType::Quantized(_) => {
+                panic!("Quantized types cannot be converted to safetensors dtype")
+            }
         }
     }
 }
@@ -219,6 +222,9 @@ impl<B: BackendStorage> Tensor<B> {
             DType::F32 => convert_slice::<_, f32>(data, shape, device),
             DType::F64 => convert_slice::<_, f64>(data, shape, device),
             DType::F8E4M3 => convert_slice::<_, F8E4M3>(data, shape, device),
+            DType::Quantized(_) => {
+                crate::bail!("safetensors does not support quantized types")
+            }
         }
     }
 }
@@ -260,6 +266,9 @@ fn convert_back<B: BackendStorage>(tensor: &Tensor<B>) -> Result<Vec<u8>> {
         DType::F32 => Ok(convert_back_::<f32>(tensor.to_vec1()?)),
         DType::F64 => Ok(convert_back_::<f64>(tensor.to_vec1()?)),
         DType::F8E4M3 => Ok(convert_back_::<F8E4M3>(tensor.to_vec1()?)),
+        DType::Quantized(_) => {
+            crate::bail!("safetensors does not support quantized types")
+        }
     }
 }
 

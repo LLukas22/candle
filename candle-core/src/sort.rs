@@ -128,6 +128,9 @@ impl<B: BackendStorage> crate::CustomOp1<B> for ArgSort {
             crate::CpuStorage::F32(vs) => self.asort(vs, layout),
             crate::CpuStorage::F64(vs) => self.asort(vs, layout),
             crate::CpuStorage::F8E4M3(vs) => self.asort(vs, layout),
+            crate::CpuStorage::Quantized(q, _) => {
+                crate::bail!("argsort not supported for quantized type {:?}", q)
+            }
         };
         let sort_indexes = crate::CpuStorage::U32(sort_indexes);
         Ok((sort_indexes, layout.shape().into()))

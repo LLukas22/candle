@@ -146,6 +146,9 @@ impl<B: BackendStorage> Tensor<B> {
                     f.write_u8(v.to_bits())?
                 }
             }
+            DType::Quantized(_) => {
+                crate::bail!("write_bytes not supported for quantized types")
+            }
         }
         Ok(())
     }

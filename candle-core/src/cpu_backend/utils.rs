@@ -16,6 +16,16 @@ pub trait Map1 {
             C::F32(vs) => Ok(C::F32(self.f(vs, layout)?)),
             C::F64(vs) => Ok(C::F64(self.f(vs, layout)?)),
             C::F8E4M3(vs) => Ok(C::F8E4M3(self.f(vs, layout)?)),
+            C::Quantized(id, data) => {
+                // Auto-dequantize, perform operation, requantize
+                crate::quantized_helpers::map1_via_dequant(
+                    *id,
+                    data,
+                    layout,
+                    "map1",
+                    |data_f32, layout| self.f(data_f32, layout),
+                )
+            }
         }
     }
 }
@@ -33,6 +43,11 @@ pub trait Map1Any {
             C::F32(vs) => Ok(self.f(vs, layout, C::F32)?),
             C::F64(vs) => Ok(self.f(vs, layout, C::F64)?),
             C::F8E4M3(vs) => Ok(self.f(vs, layout, C::F8E4M3)?),
+            C::Quantized(id, data) => {
+                // Auto-dequantize, perform operation on f32, wrap result as F32 storage
+                let data_f32 = crate::quantized_helpers::dequantize_storage(*id, data, layout)?;
+                self.f(&data_f32, layout, C::F32)
+            }
         }
     }
 }
@@ -51,6 +66,23 @@ pub trait Map2 {
             (C::F32(v1), C::F32(v2)) => Ok(C::F32(self.f(v1, l1, v2, l2)?)),
             (C::F64(v1), C::F64(v2)) => Ok(C::F64(self.f(v1, l1, v2, l2)?)),
             (C::F8E4M3(v1), C::F8E4M3(v2)) => Ok(C::F8E4M3(self.f(v1, l1, v2, l2)?)),
+            (C::Quantized(id1, data1), C::Quantized(id2, data2)) => {
+                // Check that quantized types match
+                crate::quantized_helpers::check_quantized_compat(*id1, *id2, Self::OP)?;
+                
+                // Auto-dequantize, perform operation, requantize
+                // This is the default behavior - operations with specialized quantized
+                // implementations should override this map() method
+                crate::quantized_helpers::map2_via_dequant(
+                    *id1,
+                    data1,
+                    l1,
+                    data2,
+                    l2,
+                    Self::OP,
+                    |lhs_f32, l1, rhs_f32, l2| self.f(lhs_f32, l1, rhs_f32, l2),
+                )
+            }
             _ => Err(Error::DTypeMismatchBinaryOp {
                 lhs: v1.dtype(),
                 rhs: v2.dtype(),

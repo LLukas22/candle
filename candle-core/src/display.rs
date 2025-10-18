@@ -66,6 +66,9 @@ impl<B: BackendStorage> std::fmt::Debug for Tensor<B> {
             DType::F32 => self.fmt_dt::<f32>(f),
             DType::F64 => self.fmt_dt::<f64>(f),
             DType::F8E4M3 => self.fmt_dt::<F8E4M3>(f),
+            DType::Quantized(q) => {
+                write!(f, "Tensor[{:?}, {:?}, quantized={:?}]", self.shape(), self.device(), q)
+            }
         }
     }
 }
@@ -509,6 +512,9 @@ impl<B: BackendStorage> std::fmt::Display for Tensor<B> {
                     tf.fmt_tensor(self, 1, max_w, summarize, &po, f)?;
                     writeln!(f)?;
                 }
+            }
+            DType::Quantized(q) => {
+                writeln!(f, "[quantized data: {:?}]", q)?;
             }
         };
 
