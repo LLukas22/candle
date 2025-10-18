@@ -2198,11 +2198,29 @@ impl BackendStorage for CpuStorage {
                 let data = unary_map(storage, layout, |v| v);
                 Ok(Self::F8E4M3(data))
             }
-            (_, DType::Quantized(q)) => {
-                crate::bail!("conversion to quantized type {:?} not supported", q)
+            // Conversion TO quantized types
+            (Self::F32(storage), DType::Quantized(q)) => {
+                // Extract f32 data according to layout
+                let data = unary_map(storage, layout, |v| v);
+                // Quantize using helper function
+                let quantized = crate::quantized_helpers::quantize_storage(q, &data, layout)?;
+                Ok(Self::Quantized(q, quantized))
             }
-            (Self::Quantized(q, _), _) => {
-                crate::bail!("conversion from quantized type {:?} not supported", q)
+            (_, DType::Quantized(q)) => {
+                // Convert to f32 first, then quantize
+                let f32_storage = self.to_dtype(layout, DType::F32)?;
+                f32_storage.to_dtype(layout, DType::Quantized(q))
+            }
+            // Conversion FROM quantized types
+            (Self::Quantized(q, data), DType::F32) => {
+                // Dequantize using helper function
+                let dequantized = crate::quantized_helpers::dequantize_storage(*q, data, layout)?;
+                Ok(Self::F32(dequantized))
+            }
+            (Self::Quantized(_q, _), target_dtype) => {
+                // Dequantize to f32 first, then convert to target dtype
+                let f32_storage = self.to_dtype(layout, DType::F32)?;
+                f32_storage.to_dtype(layout, target_dtype)
             }
         }
     }
@@ -2334,6 +2352,87 @@ impl BackendStorage for CpuStorage {
                     binary_map(lhs_l, rhs_l, lhs, rhs, B::u8)
                 };
                 Ok(Self::U8(data))
+            }
+            // Quantized binary operations: auto-dequantize → operate → re-quantize
+            (Self::Quantized(q_lhs, data_lhs), Self::Quantized(q_rhs, data_rhs)) => {
+                // Both sides quantized - use the left side's quantization type for result
+                if q_lhs != q_rhs {
+                    // Different quantization types - convert rhs to lhs type
+                    let rhs_f32 = crate::quantized_helpers::dequantize_storage(*q_rhs, data_rhs, rhs_l)?;
+                    let lhs_f32 = crate::quantized_helpers::dequantize_storage(*q_lhs, data_lhs, lhs_l)?;
+                    
+                    // Perform operation on f32 data
+                    let result_f32 = if B::F32_VEC {
+                        binary_map_vec(lhs_l, rhs_l, &lhs_f32, &rhs_f32, B::f32, B::f32_vec)
+                    } else {
+                        binary_map(lhs_l, rhs_l, &lhs_f32, &rhs_f32, B::f32)
+                    };
+                    
+                    // Re-quantize result using lhs quantization type
+                    let result_quantized = crate::quantized_helpers::quantize_storage(*q_lhs, &result_f32, lhs_l)?;
+                    Ok(Self::Quantized(*q_lhs, result_quantized))
+                } else {
+                    // Same quantization type
+                    let lhs_f32 = crate::quantized_helpers::dequantize_storage(*q_lhs, data_lhs, lhs_l)?;
+                    let rhs_f32 = crate::quantized_helpers::dequantize_storage(*q_rhs, data_rhs, rhs_l)?;
+                    
+                    // Perform operation on f32 data
+                    let result_f32 = if B::F32_VEC {
+                        binary_map_vec(lhs_l, rhs_l, &lhs_f32, &rhs_f32, B::f32, B::f32_vec)
+                    } else {
+                        binary_map(lhs_l, rhs_l, &lhs_f32, &rhs_f32, B::f32)
+                    };
+                    
+                    // Re-quantize result
+                    let result_quantized = crate::quantized_helpers::quantize_storage(*q_lhs, &result_f32, lhs_l)?;
+                    Ok(Self::Quantized(*q_lhs, result_quantized))
+                }
+            }
+            // Mixed precision: F32 × Quantized or Quantized × F32
+            (Self::F32(lhs), Self::Quantized(q, data_rhs)) => {
+                // Dequantize rhs, perform operation
+                let rhs_f32 = crate::quantized_helpers::dequantize_storage(*q, data_rhs, rhs_l)?;
+                
+                let result_f32 = if B::F32_VEC {
+                    binary_map_vec(lhs_l, rhs_l, lhs, &rhs_f32, B::f32, B::f32_vec)
+                } else {
+                    binary_map(lhs_l, rhs_l, lhs, &rhs_f32, B::f32)
+                };
+                
+                // Return as F32 (don't re-quantize)
+                Ok(Self::F32(result_f32))
+            }
+            (Self::Quantized(q, data_lhs), Self::F32(rhs)) => {
+                // Dequantize lhs, perform operation
+                let lhs_f32 = crate::quantized_helpers::dequantize_storage(*q, data_lhs, lhs_l)?;
+                
+                let result_f32 = if B::F32_VEC {
+                    binary_map_vec(lhs_l, rhs_l, &lhs_f32, rhs, B::f32, B::f32_vec)
+                } else {
+                    binary_map(lhs_l, rhs_l, &lhs_f32, rhs, B::f32)
+                };
+                
+                // Return as F32 (don't re-quantize)
+                Ok(Self::F32(result_f32))
+            }
+            // Quantized with other types: dequantize to F32, convert other side, operate
+            (Self::Quantized(q, data), other) | (other, Self::Quantized(q, data)) => {
+                // Dequantize the quantized side
+                let quantized_layout = if matches!(self, Self::Quantized(..)) { lhs_l } else { rhs_l };
+                let other_layout = if matches!(self, Self::Quantized(..)) { rhs_l } else { lhs_l };
+                
+                let dequantized_f32 = crate::quantized_helpers::dequantize_storage(*q, data, quantized_layout)?;
+                let dequantized = Self::F32(dequantized_f32);
+                
+                // Convert other side to F32
+                let other_f32 = other.to_dtype(other_layout, DType::F32)?;
+                
+                // Perform operation
+                if matches!(self, Self::Quantized(..)) {
+                    dequantized.binary_impl::<B>(&other_f32, lhs_l, rhs_l)
+                } else {
+                    other_f32.binary_impl::<B>(&dequantized, lhs_l, rhs_l)
+                }
             }
             _ => {
                 // This should be covered by the dtype check above.

@@ -160,7 +160,7 @@ pub fn register_quantized_types(input: TokenStream) -> TokenStream {
         /// based on the data types (CPU slices, CudaSlice, Metal buffers, etc.)
         pub mod quantized_dispatch {
             use super::*;
-            use crate::{Result, dtype::QuantizedType, Layout};
+            use crate::Result;
             
             // ==================== CPU Backend (Always Available) ====================
             
@@ -315,15 +315,16 @@ pub fn register_quantized_types(input: TokenStream) -> TokenStream {
             }
             
             /// Generic matmul - routes to CPU by default
+            /// f32 × quantized → f32 (matches matmul_cpu signature)
             #[inline]
             pub fn matmul(
-                id: QuantizedDType,
-                lhs_data: &[u8],
+                lhs_f32: &[f32],
                 lhs_shape: &[usize],
+                rhs_id: QuantizedDType,
                 rhs_data: &[u8],
                 rhs_shape: &[usize],
-            ) -> Result<Vec<u8>> {
-                matmul_cpu(id, lhs_data, lhs_shape, rhs_data, rhs_shape)
+            ) -> Result<Vec<f32>> {
+                matmul_cpu(lhs_f32, lhs_shape, rhs_id, rhs_data, rhs_shape)
             }
         }
         

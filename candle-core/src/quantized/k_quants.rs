@@ -2073,3 +2073,285 @@ verify_block_sizes!(
     BlockQ4_0, BlockQ4_1, BlockQ5_0, BlockQ5_1, BlockQ8_0, BlockQ8_1, BlockQ2K, BlockQ3K, BlockQ4K,
     BlockQ5K, BlockQ6K, BlockQ8K, f32, f16, bf16
 );
+
+// ==================== GGML Quantized Type Wrapper ====================
+// This wrapper enum allows using all GGML quantization types with a single
+// QuantizedType implementation, so you only need to call register_quantized_types!
+// once with GGMLQuantized instead of registering each type individually.
+
+/// GGML Quantization Type - wraps all GGML block types
+/// This allows registering all GGML quantization formats with a single type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GGMLQuantized {
+    Q4_0 = 0,
+    Q4_1 = 1,
+    Q5_0 = 2,
+    Q5_1 = 3,
+    Q8_0 = 4,
+    Q8_1 = 5,
+    Q2K = 6,
+    Q3K = 7,
+    Q4K = 8,
+    Q5K = 9,
+    Q6K = 10,
+    Q8K = 11,
+}
+
+impl GGMLQuantized {
+    /// Get the GGML quantization type from a GgmlDType
+    pub fn from_ggml_dtype(dtype: GgmlDType) -> Option<Self> {
+        match dtype {
+            GgmlDType::Q4_0 => Some(Self::Q4_0),
+            GgmlDType::Q4_1 => Some(Self::Q4_1),
+            GgmlDType::Q5_0 => Some(Self::Q5_0),
+            GgmlDType::Q5_1 => Some(Self::Q5_1),
+            GgmlDType::Q8_0 => Some(Self::Q8_0),
+            GgmlDType::Q8_1 => Some(Self::Q8_1),
+            GgmlDType::Q2K => Some(Self::Q2K),
+            GgmlDType::Q3K => Some(Self::Q3K),
+            GgmlDType::Q4K => Some(Self::Q4K),
+            GgmlDType::Q5K => Some(Self::Q5K),
+            GgmlDType::Q6K => Some(Self::Q6K),
+            GgmlDType::Q8K => Some(Self::Q8K),
+            _ => None,
+        }
+    }
+    
+    /// Get the GgmlDType for this quantization type
+    pub fn to_ggml_dtype(self) -> GgmlDType {
+        match self {
+            Self::Q4_0 => GgmlDType::Q4_0,
+            Self::Q4_1 => GgmlDType::Q4_1,
+            Self::Q5_0 => GgmlDType::Q5_0,
+            Self::Q5_1 => GgmlDType::Q5_1,
+            Self::Q8_0 => GgmlDType::Q8_0,
+            Self::Q8_1 => GgmlDType::Q8_1,
+            Self::Q2K => GgmlDType::Q2K,
+            Self::Q3K => GgmlDType::Q3K,
+            Self::Q4K => GgmlDType::Q4K,
+            Self::Q5K => GgmlDType::Q5K,
+            Self::Q6K => GgmlDType::Q6K,
+            Self::Q8K => GgmlDType::Q8K,
+        }
+    }
+    
+    /// Get the name of this quantization type
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Q4_0 => "Q4_0",
+            Self::Q4_1 => "Q4_1",
+            Self::Q5_0 => "Q5_0",
+            Self::Q5_1 => "Q5_1",
+            Self::Q8_0 => "Q8_0",
+            Self::Q8_1 => "Q8_1",
+            Self::Q2K => "Q2K",
+            Self::Q3K => "Q3K",
+            Self::Q4K => "Q4K",
+            Self::Q5K => "Q5K",
+            Self::Q6K => "Q6K",
+            Self::Q8K => "Q8K",
+        }
+    }
+    
+    /// Calculate storage size for a given number of elements
+    pub fn storage_size_in_bytes(self, num_elements: usize) -> usize {
+        let block_size = self.block_size();
+        let num_blocks = num_elements.div_ceil(block_size);
+        num_blocks * self.block_size_in_bytes()
+    }
+    
+    /// Get the block size (number of elements per block)
+    pub fn block_size(self) -> usize {
+        match self {
+            Self::Q4_0 => BlockQ4_0::BLCK_SIZE,
+            Self::Q4_1 => BlockQ4_1::BLCK_SIZE,
+            Self::Q5_0 => BlockQ5_0::BLCK_SIZE,
+            Self::Q5_1 => BlockQ5_1::BLCK_SIZE,
+            Self::Q8_0 => BlockQ8_0::BLCK_SIZE,
+            Self::Q8_1 => BlockQ8_1::BLCK_SIZE,
+            Self::Q2K => BlockQ2K::BLCK_SIZE,
+            Self::Q3K => BlockQ3K::BLCK_SIZE,
+            Self::Q4K => BlockQ4K::BLCK_SIZE,
+            Self::Q5K => BlockQ5K::BLCK_SIZE,
+            Self::Q6K => BlockQ6K::BLCK_SIZE,
+            Self::Q8K => BlockQ8K::BLCK_SIZE,
+        }
+    }
+    
+    /// Get the size of one block in bytes
+    pub fn block_size_in_bytes(self) -> usize {
+        match self {
+            Self::Q4_0 => std::mem::size_of::<BlockQ4_0>(),
+            Self::Q4_1 => std::mem::size_of::<BlockQ4_1>(),
+            Self::Q5_0 => std::mem::size_of::<BlockQ5_0>(),
+            Self::Q5_1 => std::mem::size_of::<BlockQ5_1>(),
+            Self::Q8_0 => std::mem::size_of::<BlockQ8_0>(),
+            Self::Q8_1 => std::mem::size_of::<BlockQ8_1>(),
+            Self::Q2K => std::mem::size_of::<BlockQ2K>(),
+            Self::Q3K => std::mem::size_of::<BlockQ3K>(),
+            Self::Q4K => std::mem::size_of::<BlockQ4K>(),
+            Self::Q5K => std::mem::size_of::<BlockQ5K>(),
+            Self::Q6K => std::mem::size_of::<BlockQ6K>(),
+            Self::Q8K => std::mem::size_of::<BlockQ8K>(),
+        }
+    }
+    
+    /// Dequantize data to f32
+    pub fn dequantize(self, data: &[u8], output: &mut [f32]) -> Result<()> {
+        let num_blocks = output.len().div_ceil(self.block_size());
+        let expected_size = num_blocks * self.block_size_in_bytes();
+        
+        if data.len() != expected_size {
+            crate::bail!(
+                "Invalid data size for {:?}: expected {} bytes, got {}",
+                self,
+                expected_size,
+                data.len()
+            );
+        }
+        
+        // Dispatch to the appropriate block type
+        macro_rules! dequantize_dispatch {
+            ($block_type:ty) => {{
+                let blocks = unsafe {
+                    std::slice::from_raw_parts(
+                        data.as_ptr() as *const $block_type,
+                        num_blocks,
+                    )
+                };
+                <$block_type as GgmlType>::to_float(blocks, output);
+            }};
+        }
+        
+        match self {
+            Self::Q4_0 => dequantize_dispatch!(BlockQ4_0),
+            Self::Q4_1 => dequantize_dispatch!(BlockQ4_1),
+            Self::Q5_0 => dequantize_dispatch!(BlockQ5_0),
+            Self::Q5_1 => dequantize_dispatch!(BlockQ5_1),
+            Self::Q8_0 => dequantize_dispatch!(BlockQ8_0),
+            Self::Q8_1 => dequantize_dispatch!(BlockQ8_1),
+            Self::Q2K => dequantize_dispatch!(BlockQ2K),
+            Self::Q3K => dequantize_dispatch!(BlockQ3K),
+            Self::Q4K => dequantize_dispatch!(BlockQ4K),
+            Self::Q5K => dequantize_dispatch!(BlockQ5K),
+            Self::Q6K => dequantize_dispatch!(BlockQ6K),
+            Self::Q8K => dequantize_dispatch!(BlockQ8K),
+        }
+        
+        Ok(())
+    }
+    
+    /// Quantize f32 data to this format
+    pub fn quantize(self, input: &[f32]) -> Result<Vec<u8>> {
+        let num_blocks = input.len().div_ceil(self.block_size());
+        let output_size = num_blocks * self.block_size_in_bytes();
+        let mut output = vec![0u8; output_size];
+        
+        // Dispatch to the appropriate block type
+        macro_rules! quantize_dispatch {
+            ($block_type:ty) => {{
+                let blocks = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        output.as_mut_ptr() as *mut $block_type,
+                        num_blocks,
+                    )
+                };
+                <$block_type as GgmlType>::from_float(input, blocks);
+            }};
+        }
+        
+        match self {
+            Self::Q4_0 => quantize_dispatch!(BlockQ4_0),
+            Self::Q4_1 => quantize_dispatch!(BlockQ4_1),
+            Self::Q5_0 => quantize_dispatch!(BlockQ5_0),
+            Self::Q5_1 => quantize_dispatch!(BlockQ5_1),
+            Self::Q8_0 => quantize_dispatch!(BlockQ8_0),
+            Self::Q8_1 => quantize_dispatch!(BlockQ8_1),
+            Self::Q2K => quantize_dispatch!(BlockQ2K),
+            Self::Q3K => quantize_dispatch!(BlockQ3K),
+            Self::Q4K => quantize_dispatch!(BlockQ4K),
+            Self::Q5K => quantize_dispatch!(BlockQ5K),
+            Self::Q6K => quantize_dispatch!(BlockQ6K),
+            Self::Q8K => quantize_dispatch!(BlockQ8K),
+        }
+        
+        Ok(output)
+    }
+    
+    /// Matrix multiplication: f32 × quantized → f32
+    /// This implements the GGML-style mixed precision matmul
+    pub fn matmul(
+        self,
+        lhs_f32: &[f32],
+        lhs_shape: &[usize],
+        rhs_data: &[u8],
+        rhs_shape: &[usize],
+    ) -> Result<Vec<f32>> {
+        // Extract dimensions (assuming standard matmul shape [m, k] × [k, n] = [m, n])
+        if lhs_shape.len() < 2 || rhs_shape.len() < 2 {
+            crate::bail!("matmul requires at least 2D shapes");
+        }
+        
+        let m = lhs_shape[lhs_shape.len() - 2];
+        let k = lhs_shape[lhs_shape.len() - 1];
+        let n = rhs_shape[rhs_shape.len() - 1];
+        
+        // Verify shapes are compatible
+        if rhs_shape[rhs_shape.len() - 2] != k {
+            crate::bail!(
+                "matmul shape mismatch: lhs [..., {}, {}] × rhs [..., {}, {}]",
+                m,
+                k,
+                rhs_shape[rhs_shape.len() - 2],
+                n
+            );
+        }
+        
+        let mut output = vec![0.0f32; m * n];
+        
+        // Dispatch to the appropriate matmul implementation
+        macro_rules! matmul_dispatch {
+            ($block_type:ty) => {{
+                let k_in_blocks = k.div_ceil(<$block_type>::BLCK_SIZE);
+                let expected_size = n * k_in_blocks * self.block_size_in_bytes();
+                
+                if rhs_data.len() != expected_size {
+                    crate::bail!(
+                        "Invalid rhs data size for {:?}: expected {} bytes, got {}",
+                        self,
+                        expected_size,
+                        rhs_data.len()
+                    );
+                }
+                
+                let rhs_blocks = unsafe {
+                    std::slice::from_raw_parts(
+                        rhs_data.as_ptr() as *const $block_type,
+                        n * k_in_blocks,
+                    )
+                };
+                
+                matmul::<$block_type>((m, k, n), lhs_f32, rhs_blocks, &mut output)?;
+            }};
+        }
+        
+        match self {
+            Self::Q4_0 => matmul_dispatch!(BlockQ4_0),
+            Self::Q4_1 => matmul_dispatch!(BlockQ4_1),
+            Self::Q5_0 => matmul_dispatch!(BlockQ5_0),
+            Self::Q5_1 => matmul_dispatch!(BlockQ5_1),
+            Self::Q8_0 => matmul_dispatch!(BlockQ8_0),
+            Self::Q8_1 => matmul_dispatch!(BlockQ8_1),
+            Self::Q2K => matmul_dispatch!(BlockQ2K),
+            Self::Q3K => matmul_dispatch!(BlockQ3K),
+            Self::Q4K => matmul_dispatch!(BlockQ4K),
+            Self::Q5K => matmul_dispatch!(BlockQ5K),
+            Self::Q6K => matmul_dispatch!(BlockQ6K),
+            Self::Q8K => matmul_dispatch!(BlockQ8K),
+        }
+        
+        Ok(output)
+    }
+}
+

@@ -14,6 +14,8 @@ mod dummy_metal;
 pub mod ggml_file;
 pub mod gguf_file;
 pub mod k_quants;
+pub mod ggml_quantized;
+pub mod ggml_wrappers;
 
 #[cfg(feature = "metal")]
 pub mod metal;

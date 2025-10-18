@@ -114,7 +114,16 @@ impl Storage {
         let lhs = self.dtype();
         let rhs = rhs.dtype();
         if lhs != rhs {
-            Err(Error::DTypeMismatchBinaryOp { lhs, rhs, op }.bt())
+            // Allow mixed quantized/F32 operations - these will be auto-dequantized
+            let is_mixed_quantized = matches!(
+                (lhs, rhs),
+                (DType::Quantized(_), DType::F32) | (DType::F32, DType::Quantized(_)) | (DType::Quantized(_), DType::Quantized(_))
+            );
+            if !is_mixed_quantized {
+                Err(Error::DTypeMismatchBinaryOp { lhs, rhs, op }.bt())
+            } else {
+                Ok(())
+            }
         } else {
             Ok(())
         }
@@ -702,6 +711,44 @@ impl BackendStorage for Storage {
         rhs_layout: &Layout,
     ) -> Result<Self> {
         self.same_device(rhs, "matmul")?;
+        
+        // Special case: F32 × Quantized matmul (specialized implementation)
+        match (self, rhs) {
+            (Self::Cpu(CpuStorage::F32(lhs_data)), Self::Cpu(CpuStorage::Quantized(q, rhs_data))) => {
+                // Extract f32 data from lhs according to layout
+                let lhs_contiguous = if lhs_layout.is_contiguous() {
+                    lhs_data.clone()
+                } else {
+                    // Need to make contiguous
+                    let elem_count = lhs_layout.shape().elem_count();
+                    let mut contiguous = vec![0.0f32; elem_count];
+                    let mut dst_index = 0;
+                    for index in lhs_layout.strided_index() {
+                        contiguous[dst_index] = lhs_data[index];
+                        dst_index += 1;
+                    }
+                    contiguous
+                };
+                
+                // Call specialized quantized matmul
+                let (b, m, n, k) = bmnk;
+                let lhs_shape = vec![b, m, k];
+                let rhs_shape = vec![b, k, n];
+                
+                let result = crate::dtype::quantized_dispatch::matmul_cpu(
+                    &lhs_contiguous,
+                    &lhs_shape,
+                    *q,
+                    rhs_data,
+                    &rhs_shape,
+                )?;
+                
+                return Ok(Self::Cpu(CpuStorage::F32(result)));
+            }
+            _ => {}
+        }
+        
+        // Regular matmul (same dtype required)
         self.same_dtype(rhs, "matmul")?;
         match (self, rhs) {
             (Self::Cpu(lhs), Self::Cpu(rhs)) => {
